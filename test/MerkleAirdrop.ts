@@ -1,84 +1,107 @@
-import { ethers } from "hardhat";
-import { expect } from "chai";
-import { Signer } from "ethers";
-import { MyERC20Token, MerkleAirdrop } from "../typechain-types";
-import { MerkleTree } from "merkletreejs";
-import keccak256 from "keccak256";
+const { time, loadFixture } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
+const { expect } = require("chai");
+const { ethers } = require("hardhat");
 
-describe("MerkleAirdrop", function () {
-    let token: MyERC20Token;
-    let airdrop: MerkleAirdrop;
-    let owner: Signer;
-    let addr1: Signer;
-    let addr2: Signer;
-    let addr3: Signer;
+describe("Airdrop", function () {
+  // Fixture for deploying the Web3CXI token contract
+  async function deployTokenFixture() {
+    // Get the first signer (account) as the owner
+    const [owner] = await ethers.getSigners();
 
-    // Sample addresses and amounts
-    const addresses = [
-        { address: "0x1234567890123456789012345678901234567890", amount: 100 },
-        { address: "0xabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd", amount: 200 }  // Valid address
-    ];
+    // Deploy the ERC20 token contract (Web3CXI)
+    const erc20Token = await ethers.getContractFactory("Web3CXI");
+    const token = await erc20Token.deploy();
 
-    let merkleRoot: string;
-    const abiCoder = new ethers.AbiCoder(); // Create an AbiCoder instance
-    const leaves = addresses.map(({ address, amount }) =>
-        keccak256(abiCoder.encode(["address", "uint256"], [address, amount]))
-    );
+    // Return the deployed token contract and owner
+    return { token, owner };
+  }
 
-    beforeEach(async function () {
-        [owner, addr1, addr2, addr3] = await ethers.getSigners();
+  // Fixture for deploying the MerkleDrop contract
+  async function deployMerkleDropFixture() {
+    // Load the token fixture to get the deployed token contract
+    const { token } = await loadFixture(deployTokenFixture);
 
-        // Create a Merkle tree and get the root
-        const tree = new MerkleTree(leaves, keccak256, { sortPairs: true });
-        merkleRoot = tree.getRoot().toString('hex');
+    // Get three signers: owner, other, and acct1
+    const [owner, other, acct1] = await ethers.getSigners();
 
-        // Deploy the ERC20 token contract
-        const TokenFactory = await ethers.getContractFactory("MyERC20Token");
-        token = (await TokenFactory.deploy()) as MyERC20Token;
+    // Predefined Merkle root to use in the MerkleDrop contract
+    const merkleRoot = "0xdad72816f97715084a191a6a826bd9f1fad5ea7bf96dc7a9111319c6302a635b";
 
-        // Wait for the contract to be deployed
-        await token.deployed();
+    // Deploy the MerkleDrop contract with the token address and Merkle root
+    const merkleDrop = await ethers.getContractFactory("MerkleDrop");
+    const merkleDropAddress = await merkleDrop.deploy(token.address, merkleRoot);
 
-        // Mint some tokens to the owner
-        await token.mint(await owner.getAddress(), ethers.utils.parseUnits("1000", 18));
+    // Return the deployed contracts and other relevant data
+    return { token, owner, other, merkleDropAddress, merkleRoot, acct1 };
+  }
 
-        // Deploy the MerkleAirdrop contract
-        const AirdropFactory = await ethers.getContractFactory("MerkleAirdrop");
-        airdrop = (await AirdropFactory.deploy(token.address, `0x${merkleRoot}`)) as MerkleAirdrop;
+  // Tests for the Web3CXI token deployment
+  describe("Web3CXI Deployment", function () {
+    it("Should mint the right 1 Million tokens", async function () {
+      // Load the token fixture
+      const { token } = await loadFixture(deployTokenFixture);
 
-        // Wait for the contract to be deployed
-        await airdrop.deployed();
+      // Define the expected total supply (1 million tokens with 18 decimals)
+      const tokents = ethers.parseUnits("1000000", 18);
+
+      // Assert that the total supply is correct
+      await expect(await token.totalSupply()).to.equal(tokents);
+    });
+  });
+
+  // Tests for the MerkleDrop contract deployment
+  describe("MerkleDrop Deployment", function () {
+    it("Should set the correct Merkle root", async function () {
+      // Load the MerkleDrop fixture
+      const { merkleDropAddress, merkleRoot } = await loadFixture(deployMerkleDropFixture);
+
+      // Assert that the Merkle root is set correctly in the contract
+      await expect(await merkleDropAddress.merkleRoot()).to.equal(merkleRoot);
     });
 
-    it("Should deploy the contracts and set the correct Merkle root", async function () {
-        expect(await airdrop.merkleRoot()).to.equal(`0x${merkleRoot}`);
+    it("Should set the correct token address", async function () {
+      // Load the MerkleDrop fixture
+      const { token, merkleDropAddress } = await loadFixture(deployMerkleDropFixture);
+
+      // Assert that the token address is correctly set in the MerkleDrop contract
+      await expect(token.address).to.equal(await merkleDropAddress.tokenAddress());
     });
 
-    it("Should allow a valid claim", async function () {
-        const leaf = keccak256(abiCoder.encode(["address", "uint256"], [addresses[0].address, addresses[0].amount]));
-        const proof = new MerkleTree(leaves, keccak256, { sortPairs: true }).getProof(leaf).map(p => `0x${p.data.toString('hex')}`);
+    it("Should have the correct owner", async function () {
+      // Load the MerkleDrop fixture
+      const { owner, merkleDropAddress } = await loadFixture(deployMerkleDropFixture);
 
-        await airdrop.connect(addr1).claimAirdrop(proof, addresses[0].amount);
-
-        expect(await token.balanceOf(await addr1.getAddress())).to.equal(ethers.utils.parseUnits("100", 18));
-        expect(await airdrop.hasClaimed(await addr1.getAddress())).to.be.true;
+      // Assert that the owner address is correctly set in the MerkleDrop contract
+      await expect(owner.address).to.equal(await merkleDropAddress.owner());
     });
+  });
 
-    it("Should reject an invalid claim", async function () {
-        const invalidProof = ["0x0000000000000000000000000000000000000000000000000000000000000000"];
-        await expect(airdrop.connect(addr1).claimAirdrop(invalidProof, addresses[0].amount)).to.be.revertedWith("MerkleAirdrop: Invalid proof");
+  // Tests for the airdrop function in the MerkleDrop contract
+  describe("Airdrop function", function () {
+    it("Should claim airdrop", async function () {
+      // Load the MerkleDrop fixture
+      const { token, merkleDropAddress, acct1 } = await loadFixture(deployMerkleDropFixture);
+
+      // Define the total amount of tokens (1 million tokens with 18 decimals)
+      const tokents = ethers.parseUnits("1000000", 18);
+
+      // Transfer the tokens to the MerkleDrop contract to fund the airdrop
+      await token.transfer(merkleDropAddress.address, tokents);
+
+      // Define the proof and the amount to claim (20 tokens)
+      const proof = [
+        "0x5d76a71bd6d384317c384db87cc35e7b1b49606ffaca4572af7f37d037120a72",
+        "0x5f8f6140f4928eb94c6d333b9942fe8199178ea0f1337b43970a92677153a18b",
+        "0xc4b85746a83f0dd6a03a4b18b22c8ecb5fc810be93e7123b2e11fdabc5de05fc",
+      ];
+      const amount = ethers.parseUnits("20", 18);
+
+      // Claim the airdrop using the proof and amount
+      await merkleDropAddress.connect(acct1).claimAirDrop(proof, 1n, amount);
+
+      // Assert that the account has received the correct amount of tokens
+      await expect(await token.balanceOf(acct1.address)).to.equal(amount);
     });
-
-    it("Should reject double claims", async function () {
-        const leaf = keccak256(abiCoder.encode(["address", "uint256"], [addresses[0].address, addresses[0].amount]));
-        const proof = new MerkleTree(leaves, keccak256, { sortPairs: true }).getProof(leaf).map(p => `0x${p.data.toString('hex')}`);
-
-        await airdrop.connect(addr1).claimAirdrop(proof, addresses[0].amount);
-        await expect(airdrop.connect(addr1).claimAirdrop(proof, addresses[0].amount)).to.be.revertedWith("MerkleAirdrop: Airdrop already claimed");
-    });
-
-    it("Should allow the owner to withdraw remaining tokens", async function () {
-        await airdrop.connect(owner).withdrawRemainingTokens(await addr1.getAddress());
-        expect(await token.balanceOf(await addr1.getAddress())).to.equal(ethers.utils.parseUnits("1000", 18));
-    });
+  });
 });

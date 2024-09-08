@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@openzeppelin/contracts": "^5.0.2",
+    "@openzeppelin/merkle-tree": "^1.0.7",
     "@typechain/ethers-v5": "^11.1.2",
     "csv-parser": "^3.0.0",
     "keccak256": "^1.0.6",
